@@ -1,0 +1,66 @@
+name: PR CI
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pr-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  plan:
+    name: Plan PR checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test CI policy
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+      - name: Select checks
+        id: scope
+        env:
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: python3 .github/scripts/ci.py plan
+  validate:
+    name: Build and test
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build production assets
+        run: npm run build:ci
+      - name: Run regression tests
+        run: npm run test:ci
+  check:
+    name: PR checks
+    needs: [plan, validate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require every planned job
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_RUN: ${{ needs.plan.outputs.run }}
+          VALIDATION_RESULT: ${{ needs.validate.result }}
+        run: python3 .github/scripts/ci.py gate
